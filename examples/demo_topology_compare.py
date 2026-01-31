@@ -1,7 +1,8 @@
 """
-Demo: compare UPS topologies + mitigation at PCC and plot harmonic spectrum overlays.
+Demo: compare UPS topologies + mitigation at PCC with IEEE-519-style IL sizing.
 
-- Uses preset spectra for 6/12/18 pulse and AFE
+- Computes IL from demand kW, VLL, PF, efficiency (IEEE-519 aligned)
+- Compares 6/12/18 pulse and AFE presets
 - Applies mitigation filters (attenuation models)
 - Prints ranked table with strict vs practical pass
 - Plots overlay of top 4 scenarios
@@ -9,6 +10,7 @@ Demo: compare UPS topologies + mitigation at PCC and plot harmonic spectrum over
 
 import matplotlib.pyplot as plt
 
+from pq_engine.analysis.pcc_sizing import PCCInputs, compute_il_ieee519, format_pcc_summary
 from pq_engine.analysis.topology_compare import compare_ups_topologies
 
 
@@ -50,9 +52,23 @@ def plot_overlays(rows, top_n=4, max_h=50):
 
 
 def main():
-    load_pu = 0.6
-    IL = 100.0
+    # Operating condition (affects harmonic spectrum magnitude model)
+    load_pu = 0.60
+
+    # IEEE-519 IL is based on max-demand point at PCC
+    pcc = PCCInputs(
+        vll_v=415.0,
+        kw_demand=1000.0,   # kW (IT/output) at max demand
+        pf_disp=0.99,
+        efficiency=0.96,
+        kw_is_output=True,
+    )
+    IL = compute_il_ieee519(pcc)
+
+    # PCC stiffness (Isc/IL)
     Isc_over_IL = 35.0
+
+    print(format_pcc_summary(pcc, load_pu))
 
     results = compare_ups_topologies(
         load_pu=load_pu,
@@ -65,7 +81,7 @@ def main():
         },
     )
 
-    print(f"\nPCC case: load={load_pu:.2f} pu, IL={IL:.1f} A, Isc/IL={Isc_over_IL:.1f}\n")
+    print(f"\nPCC case: load={load_pu:.2f} pu, IL={IL:.2f} A, Isc/IL={Isc_over_IL:.1f}\n")
     print_table(results, top_n=12)
 
     best = results[0]
