@@ -1,10 +1,10 @@
 """
 Demo: compare mitigation options for a UPS harmonic spectrum at PCC.
 
-Shows how the same baseline UPS spectrum changes with:
-- tuned filter (5th/7th)
-- broadband passive
-- active filter-like mitigation
+Prints a simple table (no extra deps) showing both:
+- strict_pass (literal IEEE-519 check)
+- practical_pass (engineering judgement for minor high-order exceedances)
+- severity_score (for ranking in practical mode)
 """
 
 from pq_engine.models.ups_harmonics import harmonic_presets, load_adjust_spectrum
@@ -12,8 +12,17 @@ from pq_engine.analysis.mitigation import compare_mitigation_options
 
 
 def print_table(rows):
-    # Lightweight pretty print without extra deps
-    cols = ["name", "tdd_percent", "tdd_limit_percent", "ieee519_pass", "risk_level", "worst_harmonic", "heating_proxy"]
+    cols = [
+        "name",
+        "tdd_percent",
+        "tdd_limit_percent",
+        "strict_pass",
+        "practical_pass",
+        "severity_score",
+        "risk_level",
+        "worst_harmonic",
+        "heating_proxy",
+    ]
     widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows)) for c in cols}
     header = " | ".join(c.ljust(widths[c]) for c in cols)
     print(header)
@@ -26,7 +35,7 @@ def print_table(rows):
 def main():
     presets = harmonic_presets()
 
-    # Choose a baseline UPS type
+    # Baseline UPS type
     profile = presets["6pulse_typical"]
 
     # Load-dependent spectrum
@@ -34,14 +43,14 @@ def main():
     base = load_adjust_spectrum(profile.harmonic_pct_of_fund_rms, load_pu, model="rectifier_like")
 
     # PCC inputs (demo)
-    IL = 100.0          # A (max demand fundamental at PCC) - set this realistically later
-    Isc_over_IL = 35.0  # moderate PCC strength
+    IL = 100.0
+    Isc_over_IL = 35.0
 
     results = compare_mitigation_options(
         base_spectrum_pct_of_fund=base,
         il_a=IL,
         isc_over_il=Isc_over_IL,
-        include_filters=["none", "tuned_5_7", "broadband_passive", "active_filter_like"]
+        include_filters=["none", "tuned_5_7", "broadband_passive", "active_filter_like"],
     )
 
     print(f"\nBaseline profile: {profile.name} @ load {load_pu:.2f} pu")
@@ -49,16 +58,25 @@ def main():
 
     print_table(results)
 
-    print("\nTop recommendation (ranked):")
+    print("\nTop recommendation (ranked, practical-mode default):")
     best = results[0]
     print(f"- {best['name']}")
     print(f"  TDD {best['tdd_percent']}% (limit {best['tdd_limit_percent']}%), risk {best['risk_level']}")
+    print(f"  strict_pass={best['strict_pass']} practical_pass={best['practical_pass']} severity={best['severity_score']}")
+
     if best["top_violations"]:
-        print("  Still violating:")
+        print("  Still violating (strict IEEE-519):")
         for v in best["top_violations"][:3]:
             print(f"   - h{v['h']}: {v['ih_pct']}% > {v['limit_pct']}%")
     else:
         print("  No individual harmonic violations in evaluation band (2–50).")
+
+    if best["major_violations"]:
+        print("  Major violations (practical mode):")
+        for v in best["major_violations"][:3]:
+            print(f"   - h{v['h']} over by {v['over_pct']}%")
+    elif best["minor_violations"]:
+        print("  Only minor high-order exceedances remain (practical mode).")
 
 
 if __name__ == "__main__":

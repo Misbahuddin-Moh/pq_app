@@ -1,27 +1,23 @@
 """
 Mitigation comparison engine (data-center oriented)
 
-What this does:
-- Compare UPS harmonic presets (6-pulse / 12-pulse / 18-pulse / AFE)
-- Apply mitigation via simple attenuation models:
-  - tuned passive (targets 5th/7th strongly)
-  - broadband passive (moderate across a band)
-  - active filter / AFE-like cleanup (strong low-order reduction)
+Compares baseline harmonic spectrum vs mitigation options via simple attenuation models.
 
 Outputs:
-- UI-ready scenario summary dicts
-- Engineer-style metrics: THD-I, TDD, IEEE-519 pass/fail, Irms inflation, heating proxy
+- strict IEEE-519 pass (TDD pass AND no individual violations)
+- practical pass (allows minor high-order exceedances)
+- severity_score (for ranking in practical mode)
+- heating proxy (eddy-current style weighting: sum(h^2 * Ih^2))
 
-Important:
-- This is not an EMTP model of filter impedance. It's an engineering screening tool.
-- In real life, filter performance depends on system impedance, tuning, detuning, resonance, etc.
-  We'll add "source impedance / resonance risk" later.
+Notes:
+- This is a screening tool (not full impedance/resonance modeling).
+- IEEE-519 limits apply at PCC and depend on Isc/IL (handled in ieee519.py).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Callable, List, Tuple
+from typing import Dict, Callable, List
 import math
 
 from pq_engine.analysis.ieee519 import evaluate_ieee519_current_limits, IEEE519CurrentReport
@@ -32,32 +28,31 @@ from pq_engine.analysis.ieee519 import evaluate_ieee519_current_limits, IEEE519C
 # ----------------------------
 
 def attenuation_none(h: int) -> float:
-    """No mitigation."""
     return 1.0
 
 
 def attenuation_tuned_5_7(h: int) -> float:
     """
-    Simple tuned passive filter effect:
-    - Strong attenuation around 5th and 7th
-    - Mild effect on nearby low-order
+    Tuned passive filter effect (simple):
+    - Strong reduction at 5th/7th
+    - Some improvement at 11th/13th
+    - Mild elsewhere in low-order
     """
     if h == 5:
-        return 0.25  # 75% reduction
+        return 0.25
     if h == 7:
-        return 0.30  # 70% reduction
+        return 0.30
     if h in (11, 13):
-        return 0.65  # partial improvement
+        return 0.65
     if 2 <= h <= 25:
-        return 0.85  # mild broadband benefit due to impedance shaping
+        return 0.85
     return 0.95
 
 
 def attenuation_broadband_passive(h: int) -> float:
     """
-    Broadband passive / line reactor + filter bank style:
-    - Moderate reduction across low-order harmonics
-    - Less aggressive than tuned
+    Broadband passive / reactor+filter bank style:
+    - Moderate reduction across low-order
     """
     if 2 <= h <= 11:
         return 0.55
@@ -70,7 +65,7 @@ def attenuation_broadband_passive(h: int) -> float:
 
 def attenuation_active_filter_like(h: int) -> float:
     """
-    Active harmonic filter / AFE-like low-order cleanup:
+    Active harmonic filter / AFE-like cleanup:
     - Strong low-order reduction, diminishing at higher order
     """
     if 2 <= h <= 11:
@@ -94,11 +89,8 @@ def apply_attenuation(
     harmonic_pct_of_fund: Dict[int, float],
     attenuation_fn: Callable[[int], float],
 ) -> Dict[int, float]:
-    """Return new spectrum with attenuation applied per harmonic order."""
-    out: Dict[int, float] = {}
-    for h, pct in harmonic_pct_of_fund.items():
-        out[h] = float(pct) * float(attenuation_fn(int(h)))
-    return out
+    """Apply attenuation factor per harmonic order."""
+    return {int(h): float(pct) * float(attenuation_fn(int(h))) for h, pct in harmonic_pct_of_fund.items()}
 
 
 # ----------------------------
@@ -109,21 +101,21 @@ def thd_i_from_pct(harmonic_pct_of_fund: Dict[int, float], max_h: int = 50) -> f
     """THD-I from % of fundamental RMS."""
     s = 0.0
     for h, pct in harmonic_pct_of_fund.items():
-        if 2 <= int(h) <= max_h:
+        h = int(h)
+        if 2 <= h <= max_h:
             s += (pct / 100.0) ** 2
     return math.sqrt(s)  # per-unit
 
 
 def irms_inflation_factor(thd_pu: float) -> float:
-    """Irms / I1 assuming harmonics orthogonal: sqrt(1 + THD^2)."""
+    """Irms / I1 assuming orthogonal harmonics."""
     return math.sqrt(1.0 + thd_pu * thd_pu)
 
 
 def transformer_heating_proxy(harmonic_pct_of_fund: Dict[int, float], max_h: int = 50) -> float:
     """
-    Simple transformer eddy-current style proxy:
-    ~ sum(h^2 * Ih^2) where Ih is per-unit of I1.
-    Higher orders contribute disproportionately to eddy losses.
+    Eddy-current style proxy:
+      sum(h^2 * Ih^2), Ih in per-unit of I1.
     """
     s = 0.0
     for h, pct in harmonic_pct_of_fund.items():
@@ -163,7 +155,7 @@ def run_scenario(
         harmonic_percent_of_fund=spectrum_pct_of_fund,
         il_a=il_a,
         isc_a=isc_a,
-        voltage_class="120V-69kV"
+        voltage_class="120V-69kV",
     )
 
     return ScenarioResult(
@@ -172,18 +164,64 @@ def run_scenario(
         thd_i_percent=thd_pct,
         irms_over_i1=infl,
         heating_proxy=heat,
-        ieee519=rpt
+        ieee519=rpt,
     )
+
+
+def _split_major_minor_violations(ieee: IEEE519CurrentReport) -> tuple[list, list]:
+    """
+    Practical categorization:
+    - Low-order (<=13) failures are always major
+    - High-order tiny exceedances are minor
+    """
+    minor = []
+    major = []
+    for v in ieee.worst_violations:
+        over = v.ih_percent_of_il - v.limit_percent_of_il
+        if v.h <= 13:
+            major.append(v)
+        elif v.h >= 23 and over <= 1.0:
+            minor.append(v)
+        elif v.h >= 17 and over <= 0.5:
+            minor.append(v)
+        else:
+            major.append(v)
+    return major, minor
+
+
+def _severity_score(ieee: IEEE519CurrentReport) -> float:
+    """
+    Severity emphasizes low-order + big exceedances; downweights minor high-order misses.
+    """
+    sev = 0.0
+    for v in ieee.worst_violations:
+        over = max(0.0, v.ih_percent_of_il - v.limit_percent_of_il)
+
+        if v.h <= 13:
+            w = 5.0
+        elif v.h <= 23:
+            w = 2.0
+        else:
+            w = 1.0
+
+        # downweight minor high-order exceedances
+        if (v.h >= 23 and over <= 1.0) or (v.h >= 17 and over <= 0.5):
+            w *= 0.2
+
+        sev += w * over
+
+    return float(sev)
 
 
 def compare_mitigation_options(
     base_spectrum_pct_of_fund: Dict[int, float],
     il_a: float,
     isc_over_il: float,
-    include_filters: List[str] = None,
+    include_filters: List[str] | None = None,
 ) -> List[dict]:
     """
     Returns UI-ready list of dicts describing scenarios.
+    Default ranking favors practical-mode outcomes.
     """
     include_filters = include_filters or ["none", "tuned_5_7", "broadband_passive", "active_filter_like"]
 
@@ -194,7 +232,7 @@ def compare_mitigation_options(
     # Baseline
     scenarios.append(run_scenario("baseline", base_spectrum_pct_of_fund, il_a=il_a, isc_a=isc_a))
 
-    # Filtered versions
+    # Filtered
     for fkey in include_filters:
         if fkey == "none":
             continue
@@ -202,22 +240,38 @@ def compare_mitigation_options(
         sp = apply_attenuation(base_spectrum_pct_of_fund, att)
         scenarios.append(run_scenario(f"baseline + {fkey}", sp, il_a=il_a, isc_a=isc_a))
 
-    # Rank: prefer pass, then lower TDD, then lower heating proxy
+    # Practical ranking:
+    # 1) TDD pass
+    # 2) major violation count
+    # 3) severity score
+    # 4) TDD magnitude
+    # 5) heating proxy
     def rank_key(s: ScenarioResult):
-        pass_score = 0 if s.ieee519.tdd_pass and len(s.ieee519.worst_violations) == 0 else 1
-        return (pass_score, s.ieee519.tdd_percent, s.heating_proxy)
+        major, _minor = _split_major_minor_violations(s.ieee519)
+        tdd_fail = 0 if s.ieee519.tdd_pass else 1
+        return (tdd_fail, len(major), _severity_score(s.ieee519), s.ieee519.tdd_percent, s.heating_proxy)
 
     scenarios_sorted = sorted(scenarios, key=rank_key)
 
     out: List[dict] = []
     for s in scenarios_sorted:
         worst = s.ieee519.worst_violations[0].h if s.ieee519.worst_violations else None
+
+        strict_pass = bool(s.ieee519.tdd_pass and len(s.ieee519.worst_violations) == 0)
+
+        major, minor = _split_major_minor_violations(s.ieee519)
+        practical_pass = bool(s.ieee519.tdd_pass and len(major) == 0)
+
+        severity = _severity_score(s.ieee519)
+
         out.append({
             "name": s.name,
             "thd_i_percent": round(s.thd_i_percent, 2),
             "tdd_percent": round(s.ieee519.tdd_percent, 2),
             "tdd_limit_percent": round(s.ieee519.tdd_limit_percent, 2),
-            "ieee519_pass": bool(s.ieee519.tdd_pass and len(s.ieee519.worst_violations) == 0),
+            "strict_pass": strict_pass,
+            "practical_pass": practical_pass,
+            "severity_score": round(severity, 3),
             "risk_level": s.ieee519.risk_level,
             "isc_over_il": round(s.ieee519.isc_over_il, 1),
             "worst_harmonic": worst,
@@ -226,6 +280,14 @@ def compare_mitigation_options(
             "top_violations": [
                 {"h": v.h, "ih_pct": round(v.ih_percent_of_il, 2), "limit_pct": round(v.limit_percent_of_il, 2)}
                 for v in s.ieee519.worst_violations
+            ],
+            "major_violations": [
+                {"h": v.h, "over_pct": round((v.ih_percent_of_il - v.limit_percent_of_il), 2)}
+                for v in major
+            ],
+            "minor_violations": [
+                {"h": v.h, "over_pct": round((v.ih_percent_of_il - v.limit_percent_of_il), 2)}
+                for v in minor
             ],
             "interpretation": s.ieee519.interpretation,
         })
