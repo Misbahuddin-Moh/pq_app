@@ -1,11 +1,15 @@
 """
-Demo: compare UPS topologies + mitigation at PCC with IEEE-519-style IL sizing.
+Demo: compare UPS topologies + mitigation at PCC with utility-style PCC strength input.
 
-- Computes IL from demand kW, VLL, PF, efficiency (IEEE-519 aligned)
-- Compares 6/12/18 pulse and AFE presets
-- Applies mitigation filters (attenuation models)
-- Prints ranked table with strict vs practical pass
-- Plots overlay of top 4 scenarios
+Inputs:
+- Demand sizing for IL (IEEE-519 IL)
+- PCC short-circuit MVA (utility input) for:
+  - Isc/IL used in current limits
+  - Zth used in THDv estimate
+
+Outputs:
+- ranked table including THDv
+- overlay spectrum plot for top scenarios
 """
 
 import matplotlib.pyplot as plt
@@ -17,14 +21,16 @@ from pq_engine.analysis.topology_compare import compare_ups_topologies
 def print_table(rows, top_n=12):
     cols = [
         "name",
+        "thdv_percent",
+        "thdv_limit_percent",
+        "thdv_pass",
         "tdd_percent",
         "tdd_limit_percent",
-        "strict_pass",
         "practical_pass",
         "severity_score",
-        "risk_level",
+        "risk_level_voltage",
+        "risk_level_current",
         "worst_harmonic",
-        "heating_proxy",
     ]
     rows = rows[:top_n]
     widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows)) for c in cols}
@@ -52,50 +58,47 @@ def plot_overlays(rows, top_n=4, max_h=50):
 
 
 def main():
-    # Operating condition (affects harmonic spectrum magnitude model)
     load_pu = 0.60
 
-    # IEEE-519 IL is based on max-demand point at PCC
+    # IEEE-519 IL sizing at PCC (max-demand point)
     pcc = PCCInputs(
         vll_v=415.0,
-        kw_demand=1000.0,   # kW (IT/output) at max demand
+        kw_demand=1000.0,   # IT/output kW at demand
         pf_disp=0.99,
         efficiency=0.96,
         kw_is_output=True,
     )
     IL = compute_il_ieee519(pcc)
 
-    # PCC stiffness (Isc/IL)
-    Isc_over_IL = 35.0
+    # Utility-style PCC strength input
+    # Try e.g. 50, 100, 250, 500 MVA to see how THDv changes.
+    sc_mva = 150.0
 
     print(format_pcc_summary(pcc, load_pu))
+    print(f"Utility PCC strength: Ssc = {sc_mva:.1f} MVA\n")
 
     results = compare_ups_topologies(
         load_pu=load_pu,
         il_a=IL,
-        isc_over_il=Isc_over_IL,
+        vll_v=pcc.vll_v,
+        sc_mva=sc_mva,
         topology_keys=["6pulse_typical", "12pulse_typical", "18pulse_typical", "afe_low_harm"],
         filters=["none", "tuned_5_7", "broadband_passive", "active_filter_like"],
         per_topology_filter_map={
-            "afe_low_harm": ["none"],  # realism: AFE usually doesn't need extra filtering
+            "afe_low_harm": ["none"],  # realism: AFE typically doesn't need extra filtering
         },
+        thdv_limit_percent=5.0,
+        z_freq_exp=1.0,
     )
 
-    print(f"\nPCC case: load={load_pu:.2f} pu, IL={IL:.2f} A, Isc/IL={Isc_over_IL:.1f}\n")
     print_table(results, top_n=12)
 
     best = results[0]
-    print("\nTop recommendation (practical ranking):")
+    print("\nTop recommendation (utility-real ranking: voltage -> current -> heating):")
     print(f"- {best['name']}")
-    print(f"  TDD {best['tdd_percent']}% (limit {best['tdd_limit_percent']}%), risk {best['risk_level']}")
-    print(f"  strict_pass={best['strict_pass']} practical_pass={best['practical_pass']} severity={best['severity_score']}")
-
-    if best["major_violations"]:
-        print("  Major violations remain (practical mode):")
-        for v in best["major_violations"][:3]:
-            print(f"   - h{v['h']} over by {v['over_pct']}%")
-    elif best["minor_violations"]:
-        print("  Only minor high-order exceedances remain (practical mode).")
+    print(f"  THDv {best['thdv_percent']}% (limit {best['thdv_limit_percent']}%) pass={best['thdv_pass']} riskV={best['risk_level_voltage']}")
+    print(f"  TDD  {best['tdd_percent']}% (limit {best['tdd_limit_percent']}%) practical_pass={best['practical_pass']} riskI={best['risk_level_current']}")
+    print(f"  severity={best['severity_score']} Isc/IL={best['isc_over_il']}")
 
     plot_overlays(results, top_n=4, max_h=50)
 
