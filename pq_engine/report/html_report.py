@@ -1,17 +1,15 @@
 """
 HTML report generator for UPS Harmonics & Power Quality Analyzer.
 
-- No web frameworks, just produces a standalone HTML file.
+- Produces a standalone HTML file.
 - Writes plots as PNGs into the same output directory for portability.
 
-Requires:
-- matplotlib (already used in your demos)
+Engine is frozen: this module is presentation-only.
 """
 
 from __future__ import annotations
 
 import os
-import math
 import datetime as _dt
 from typing import List, Dict, Optional
 
@@ -30,6 +28,39 @@ def _escape(s: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def _risk_badge(risk: str) -> str:
+    r = (risk or "").upper()
+    cls = "risk-low"
+    if r == "MEDIUM":
+        cls = "risk-med"
+    elif r == "HIGH":
+        cls = "risk-high"
+    return f'<span class="badge {cls}">{_escape(r)}</span>'
+
+
+def _ellipsize(s: str, max_len: int = 44) -> str:
+    s = str(s)
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def _table_html(headers: List[str], rows: List[List[str]]) -> str:
+    th = "".join(f"<th>{_escape(h)}</th>" for h in headers)
+    trs = []
+    for row in rows:
+        tds = "".join(f"<td>{cell}</td>" for cell in row)  # cells are already escaped or HTML
+        trs.append(f"<tr>{tds}</tr>")
+    return f"""
+<table>
+  <thead><tr>{th}</tr></thead>
+  <tbody>
+    {''.join(trs)}
+  </tbody>
+</table>
+""".strip()
 
 
 def _write_png_spectrum_overlay(
@@ -62,15 +93,8 @@ def _write_png_thdv_sweep(
     out_dir: str,
     filename: str = "thdv_vs_sc_mva.png",
 ) -> Optional[str]:
-    """
-    sweep_rows: list of dicts each containing:
-      sc_mva, thdv_percent, option_name (optional)
-
-    If empty, returns None.
-    """
     if not sweep_rows:
         return None
-
     _ensure_dir(out_dir)
     xs = [r["sc_mva"] for r in sweep_rows]
     ys = [r["thdv_percent"] for r in sweep_rows]
@@ -79,38 +103,12 @@ def _write_png_thdv_sweep(
     plt.plot(xs, ys)
     plt.xlabel("PCC short-circuit strength Ssc (MVA)")
     plt.ylabel("THDv (%)")
-    plt.title("Voltage distortion sensitivity to PCC strength (THDv vs Ssc)")
+    plt.title("Voltage distortion sensitivity (THDv vs Ssc)")
     plt.grid(True)
     path = os.path.join(out_dir, filename)
     plt.savefig(path, dpi=160, bbox_inches="tight")
     plt.close()
     return filename
-
-
-def _table_html(headers: List[str], rows: List[List[str]]) -> str:
-    th = "".join(f"<th>{_escape(h)}</th>" for h in headers)
-    trs = []
-    for row in rows:
-        tds = "".join(f"<td>{_escape(cell)}</td>" for cell in row)
-        trs.append(f"<tr>{tds}</tr>")
-    return f"""
-<table>
-  <thead><tr>{th}</tr></thead>
-  <tbody>
-    {''.join(trs)}
-  </tbody>
-</table>
-""".strip()
-
-
-def _risk_badge(risk: str) -> str:
-    r = (risk or "").upper()
-    cls = "risk-low"
-    if r == "MEDIUM":
-        cls = "risk-med"
-    elif r == "HIGH":
-        cls = "risk-high"
-    return f'<span class="badge {cls}">{_escape(r)}</span>'
 
 
 def generate_html_report(
@@ -123,36 +121,64 @@ def generate_html_report(
     tipping_rows: List[List[str]],
     sweep_rows: Optional[List[dict]] = None,
 ) -> str:
-    """
-    Creates an HTML report in out_dir and returns the report filepath.
-
-    inputs_block: dict of key->value strings to display
-    best: best scenario dict from compare_ups_topologies
-    top_results: list of scenario dicts (sorted) from compare_ups_topologies
-    tipping_rows: already-formatted rows for tipping points table (strings)
-    sweep_rows: optional list for THDv sweep plot
-    """
     _ensure_dir(out_dir)
 
-    # Plots
     spectrum_png = _write_png_spectrum_overlay(top_results, out_dir, top_n=min(4, len(top_results)))
     thdv_png = _write_png_thdv_sweep(sweep_rows or [], out_dir) if sweep_rows is not None else None
 
-    # Build summary blocks
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Best recommendation summary
-    best_lines = [
-        ["Recommended option", best.get("name", "")],
-        ["Voltage (THDv)", f"{best.get('thdv_percent','')}%  (limit {best.get('thdv_limit_percent','')}%)  pass={best.get('thdv_pass','')}"],
-        ["Current (TDD)", f"{best.get('tdd_percent','')}%  (limit {best.get('tdd_limit_percent','')}%)  practical_pass={best.get('practical_pass','')}"],
-        ["Risk (Voltage)", best.get("risk_level_voltage", "")],
-        ["Risk (Current)", best.get("risk_level_current", "")],
-        ["Isc/IL", str(best.get("isc_over_il", ""))],
-        ["Worst harmonic", str(best.get("worst_harmonic", ""))],
-    ]
+    # Build "key takeaways" bullets (presentation-only, derived from already computed fields)
+    takeaways = []
+    takeaways.append(
+        f"Recommended option <b>{_escape(best.get('name',''))}</b> "
+        f"at Ssc={_escape(inputs_block.get('PCC strength (Ssc)',''))}."
+    )
+    takeaways.append(
+        f"Voltage distortion: THDv={_escape(best.get('thdv_percent',''))}% "
+        f"(limit {_escape(best.get('thdv_limit_percent',''))}%) → "
+        f"{'PASS' if best.get('thdv_pass') else 'FAIL'}."
+    )
+    takeaways.append(
+        f"Current distortion: TDD={_escape(best.get('tdd_percent',''))}% "
+        f"(limit {_escape(best.get('tdd_limit_percent',''))}%) → "
+        f"{'PASS' if best.get('practical_pass') else 'FAIL (practical)'}."
+    )
+    takeaways.append(
+        f"PCC category: Isc/IL={_escape(best.get('isc_over_il',''))} → "
+        f"IEEE-519 TDD limit shown above."
+    )
+    # Highlight common “gotcha” from tipping points: if any option shows >500 MVA for current
+    for row in tipping_rows:
+        opt, _, cur = row
+        if "> 500" in cur and "no filter" in opt.lower():
+            takeaways.append(
+                "Several non-AFE options do not achieve practical current pass within the tested PCC range "
+                "(often due to low-order harmonic limits), even if THDv can pass."
+            )
+            break
 
-    # Top results table
+    takeaways_html = "<ul>" + "".join(f"<li>{t}</li>" for t in takeaways) + "</ul>"
+
+    # Exec summary table rows (with risk badges)
+    best_lines = [
+        ("Recommended option", _escape(best.get("name", ""))),
+        ("Voltage (THDv)", _escape(f"{best.get('thdv_percent','')}% (limit {best.get('thdv_limit_percent','')}%) pass={best.get('thdv_pass','')}")),
+        ("Current (TDD)", _escape(f"{best.get('tdd_percent','')}% (limit {best.get('tdd_limit_percent','')}%) practical_pass={best.get('practical_pass','')}")),
+        ("Risk (Voltage)", _risk_badge(best.get("risk_level_voltage", ""))),
+        ("Risk (Current)", _risk_badge(best.get("risk_level_current", ""))),
+        ("Isc/IL", _escape(best.get("isc_over_il", ""))),
+        ("Worst harmonic", _escape(best.get("worst_harmonic", ""))),
+    ]
+    best_table = "<table><tbody>" + "".join(
+        f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in best_lines
+    ) + "</tbody></table>"
+
+    # Inputs table
+    inputs_rows = [[_escape(k), _escape(v)] for k, v in inputs_block.items()]
+    inputs_table = _table_html(["Input", "Value"], [[f"{k}", f"{v}"] for k, v in inputs_rows])
+
+    # Top scenarios table
     headers = [
         "Scenario",
         "THDv (%)",
@@ -167,25 +193,22 @@ def generate_html_report(
     rows = []
     for r in top_results[:12]:
         rows.append([
-            r.get("name", ""),
-            str(r.get("thdv_percent", "")),
-            str(r.get("thdv_pass", "")),
-            str(r.get("tdd_percent", "")),
-            str(r.get("tdd_limit_percent", "")),
-            str(r.get("practical_pass", "")),
-            r.get("risk_level_voltage", ""),
-            r.get("risk_level_current", ""),
-            str(r.get("worst_harmonic", "")),
+            f"<span title=\"{_escape(r.get('name',''))}\">{_escape(_ellipsize(r.get('name','')))}</span>",
+            _escape(r.get("thdv_percent", "")),
+            _escape(r.get("thdv_pass", "")),
+            _escape(r.get("tdd_percent", "")),
+            _escape(r.get("tdd_limit_percent", "")),
+            _escape(r.get("practical_pass", "")),
+            _risk_badge(r.get("risk_level_voltage", "")),
+            _risk_badge(r.get("risk_level_current", "")),
+            _escape(r.get("worst_harmonic", "")),
         ])
-
     top_table = _table_html(headers, rows)
 
+    # Tipping points table
     tipping_headers = ["Option", "Min Ssc for THDv", "Min Ssc for Current (practical)"]
-    tipping_table = _table_html(tipping_headers, tipping_rows)
-
-    # Inputs table
-    inputs_rows = [[k, v] for k, v in inputs_block.items()]
-    inputs_table = _table_html(["Input", "Value"], inputs_rows)
+    tipping_rows_html = [[_escape(a), _escape(b), _escape(c)] for a, b, c in tipping_rows]
+    tipping_table = _table_html(tipping_headers, tipping_rows_html)
 
     html = f"""<!doctype html>
 <html>
@@ -227,21 +250,20 @@ def generate_html_report(
   th {{
     background: #fafafa;
     font-weight: 600;
+    width: 34%;
   }}
   .badge {{
     display: inline-block;
     padding: 2px 8px;
     border-radius: 999px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 700;
     border: 1px solid #ddd;
   }}
   .risk-low {{ background: #ecfdf5; border-color: #a7f3d0; }}
   .risk-med {{ background: #fffbeb; border-color: #fde68a; }}
   .risk-high {{ background: #fef2f2; border-color: #fecaca; }}
-  .imgwrap {{
-    margin-top: 10px;
-  }}
+  .imgwrap {{ margin-top: 10px; }}
   img {{
     max-width: 100%;
     height: auto;
@@ -267,20 +289,12 @@ def generate_html_report(
   <div class="card">
     <h2>Executive Summary</h2>
     <p class="muted">
-      This screening report estimates UPS-driven harmonic current distortion at the PCC (IEEE-519-style)
-      and estimates PCC voltage distortion (THDv) based on short-circuit strength (Ssc).
+      Screening report estimating UPS-driven harmonic current distortion at the PCC (IEEE-519-style)
+      and estimating PCC voltage distortion (THDv) from short-circuit strength (Ssc).
     </p>
-
-    <table>
-      <tbody>
-        {''.join(f"<tr><th>{_escape(k)}</th><td>{_escape(v)}</td></tr>" for k,v in best_lines)}
-      </tbody>
-    </table>
-
-    <div style="margin-top: 8px;">
-      Voltage risk: {_risk_badge(best.get("risk_level_voltage",""))}
-      &nbsp; Current risk: {_risk_badge(best.get("risk_level_current",""))}
-    </div>
+    <h3>Key takeaways</h3>
+    {takeaways_html}
+    {best_table}
   </div>
 
   <div class="card">
