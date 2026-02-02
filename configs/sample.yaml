@@ -1,0 +1,49 @@
+site:
+  vll_v: 415.0
+  frequency_hz: 60.0
+
+load:
+  demand_kw: 1000.0
+  load_pu: 0.60
+  pf_displacement: 0.99
+  efficiency: 0.96
+  kw_is_output: true
+
+grid:
+  sc_mva: 50.0
+  z_exp: 1.0
+
+limits:
+  thdv_limit_pct: 5.0
+
+scenario_space:
+  topology_keys: [6pulse_typical, 12pulse_typical, 18pulse_typical, afe_low_harm]
+  filters: [none, tuned_5_7, broadband_passive, active_filter_like]
+  per_topology_filter_map:
+    afe_low_harm: [none]
+
+report:
+  enabled: true
+  report_name: "UPS Harmonics & Power Quality Screening Report"
+
+sweeps:
+  thdv_vs_sc_mva:
+    enabled: true
+    points: [20.0, 35.0, 50.0, 75.0, 100.0, 150.0, 250.0, 500.0]
+  tipping_points:
+    enabled: true
+    grid: [10, 15, 20, 25, 30, 35, 40, 50, 60, 75, 100, 150, 250, 500]
+    options:
+      - "AFE (low low-order harmonics) (no filter)"
+      - "18-pulse (typical) (no filter)"
+      - "12-pulse (typical) (no filter)"
+      - "6-pulse (typical) (no filter)"
+      - "18-pulse (typical) + active_filter_like"
+      - "12-pulse (typical) + active_filter_like"
+      - "6-pulse (typical) + active_filter_like"
+
+tool:
+  name: ups-pq-analyzer
+  version: 0.1.0
+  commit: 11C
+  engine_frozen: true
