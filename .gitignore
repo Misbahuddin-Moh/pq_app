@@ -1,12 +1,20 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
+venv/
+.env
 
-# macOS
-.DS_Store
-
-# IDEs
-.vscode/
-.idea/
+# Outputs / artifacts
 outputs/
+*.png
+*.html
+*.pdf
+*.zip
+
+# Node
+node_modules/
+dist/
+build/
