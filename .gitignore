@@ -18,3 +18,10 @@ outputs/
 node_modules/
 dist/
 build/
+
+# macOS
+.DS_Store
+
+# Node (engine repo should not track these)
+package.json
+package-lock.json
