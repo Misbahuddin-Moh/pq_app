@@ -25,3 +25,7 @@ build/
 # Node (engine repo should not track these)
 package.json
 package-lock.json
+
+# Runtime / generated artifacts
+backend/storage/
+backend/storage/**
