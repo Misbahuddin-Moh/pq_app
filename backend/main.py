@@ -1,229 +1,238 @@
-import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
+import json
 import uuid
+import shutil
+import tempfile
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+
+# -----------------------------
+# App
+# -----------------------------
+app = FastAPI(title="pq-app-backend", version="0.1.0")
 
 
-APP_NAME = "pq-app-backend"
-DEFAULT_ENGINE_MODULE = "pq_engine.cli"  # frozen engine entrypoint module
-RESULTS_FILENAME = "results.json"
+def _parse_cors_origins(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return ["*"]
+    raw = raw.strip()
+    if raw == "*":
+        return ["*"]
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
-# Storage defaults to a folder in the backend directory (OK for local + MVP).
-# For production durability, switch STORAGE_DIR to an attached disk or object storage.
-DEFAULT_STORAGE_DIR = Path(__file__).resolve().parent / "storage"
 
-
-app = FastAPI(title=APP_NAME, version="0.1.1")
-
-# CORS: set CORS_ORIGINS="https://your-frontend-domain.com,https://another.com"
-cors_env = os.getenv("CORS_ORIGINS", "")
-if cors_env.strip():
-    origins = [o.strip() for o in cors_env.split(",") if o.strip()]
-else:
-    origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+CORS_ORIGINS = _parse_cors_origins(os.getenv("CORS_ORIGINS", "*"))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Where we persist finished run artifacts (Render free tier: best-effort / may be ephemeral)
+RUNS_DIR = Path(os.getenv("RUNS_DIR", "/tmp/pq_runs")).resolve()
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def _tail(s: str, max_chars: int = 2000) -> str:
+    if not s:
+        return ""
+    return s[-max_chars:]
+
+
+def _safe_read_json(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read results.json: {e}")
+
+
+def _build_api_artifacts(run_id: str, results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Add UI-friendly, deployment-agnostic (relative) URLs for artifacts.
+
+    IMPORTANT:
+    - We do NOT modify/reshape engine output.
+    - We only ADD a convenience block in the API response.
+    """
+    base = f"/api/runs/{run_id}"
+    api_artifacts: Dict[str, Any] = {
+        "results_url": f"{base}/results",
+        "report_html_url": None,
+        "plots": [],
+        "raw": [],
+    }
+
+    artifacts = results.get("artifacts") or {}
+    # report html
+    report_html_path = artifacts.get("report_html")
+    if isinstance(report_html_path, str) and report_html_path:
+        api_artifacts["report_html_url"] = f"{base}/files/{Path(report_html_path).name}"
+
+    # plots
+    plots = artifacts.get("plots") or []
+    if isinstance(plots, list):
+        for p in plots:
+            if not isinstance(p, dict):
+                continue
+            name = p.get("name")
+            path = p.get("path")
+            if isinstance(path, str) and path:
+                api_artifacts["plots"].append(
+                    {"name": name, "url": f"{base}/files/{Path(path).name}"}
+                )
+
+    # raw files (e.g., results_json)
+    raw = artifacts.get("raw") or []
+    if isinstance(raw, list):
+        for r in raw:
+            if not isinstance(r, dict):
+                continue
+            name = r.get("name")
+            path = r.get("path")
+            if isinstance(path, str) and path:
+                api_artifacts["raw"].append({"name": name, "url": f"{base}/files/{Path(path).name}"})
+
+    return api_artifacts
+
+
+def _run_engine(config_bytes: bytes, config_filename: str) -> Dict[str, Any]:
+    """
+    Runs the frozen pq-engine CLI in an isolated temp workdir, then persists outputs under RUNS_DIR/<run_id>/.
+    Returns: (run_id, results_json_dict)
+    """
+    run_id = str(uuid.uuid4())
+    run_dir = (RUNS_DIR / run_id).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Work directory for engine execution
+    with tempfile.TemporaryDirectory(prefix="pq_run_") as tmp:
+        tmp_path = Path(tmp).resolve()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save uploaded config
+        # Keep extension if provided; engine expects YAML.
+        suffix = Path(config_filename).suffix or ".yaml"
+        config_path = tmp_path / f"config{suffix}"
+        config_path.write_bytes(config_bytes)
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "pq_engine.cli",
+            "--config",
+            str(config_path),
+            "--out",
+            str(outputs_dir),
+        ]
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
+
+        if proc.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Engine execution failed.",
+                    "returncode": proc.returncode,
+                    "stdout_tail": _tail(proc.stdout, 2000),
+                    "stderr_tail": _tail(proc.stderr, 4000),
+                },
+            )
+
+        results_path = outputs_dir / "results.json"
+        if not results_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Engine completed but results.json was not produced.",
+            )
+
+        # Persist all artifacts (results.json, report.html, pngs, etc.)
+        for p in outputs_dir.iterdir():
+            if p.is_file():
+                shutil.copy2(p, run_dir / p.name)
+
+        results = _safe_read_json(run_dir / "results.json")
+        return {"run_id": run_id, "results": results}
+
+
+# -----------------------------
+# Routes
+# -----------------------------
 @app.get("/health")
-def health():
-    return {"ok": True, "service": APP_NAME}
+def health() -> Dict[str, Any]:
+    return {"ok": True, "service": "pq-app-backend"}
 
 
-def _safe_filename(name: str) -> str:
-    name = name.replace("\\", "/").split("/")[-1]
-    name = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_", ".", "+"))
-    return name or "file"
-
-
-def _storage_dir() -> Path:
-    p = os.getenv("STORAGE_DIR", "").strip()
-    base = Path(p) if p else DEFAULT_STORAGE_DIR
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-
-
-def _run_dir(run_id: str) -> Path:
-    d = _storage_dir() / run_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _run_engine(config_path: Path, out_dir: Path) -> subprocess.CompletedProcess:
+@app.post("/api/analyze")
+async def analyze(config: UploadFile = File(...)) -> Response:
     """
-    Runs the frozen engine CLI via python -m <module>.
-    Uses the same interpreter as this server (sys.executable) so venv site-packages are available.
+    Accepts a YAML config file as multipart/form-data and returns results.json (engine output) as-is,
+    with an added convenience block "api_artifacts" containing relative URLs.
     """
-    engine_module = os.getenv("PQ_ENGINE_MODULE", DEFAULT_ENGINE_MODULE)
-    python_bin = os.getenv("PYTHON_BIN", sys.executable)
+    try:
+        config_bytes = await config.read()
+        payload = _run_engine(config_bytes=config_bytes, config_filename=config.filename or "config.yaml")
+        run_id = payload["run_id"]
+        results = payload["results"]
 
-    cmd = [
-        python_bin,
-        "-m",
-        engine_module,
-        "--config",
-        str(config_path),
-        "--out",
-        str(out_dir),
-    ]
+        # Add UI-friendly relative URLs without altering engine output
+        api_artifacts = _build_api_artifacts(run_id, results)
+        merged = dict(results)
+        merged["api_artifacts"] = api_artifacts
 
-    timeout_s: Optional[float] = None
-    t = os.getenv("ENGINE_TIMEOUT_SECONDS", "").strip()
-    if t:
-        try:
-            timeout_s = float(t)
-        except ValueError:
-            timeout_s = None
-
-    return subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=str(out_dir),
-        timeout=timeout_s,
-    )
-
-
-def _copy_outputs(src_out_dir: Path, dst_run_dir: Path) -> None:
-    """
-    Copy everything produced by the engine into persistent storage for the run.
-    """
-    for item in src_out_dir.iterdir():
-        target = dst_run_dir / item.name
-        if item.is_dir():
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(item, target)
-        else:
-            shutil.copy2(item, target)
+        return JSONResponse(content=merged, headers={"X-Run-Id": run_id})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected server error: {e}")
 
 
 @app.get("/api/runs/{run_id}/results")
-def get_results(run_id: str):
-    rp = _run_dir(run_id) / RESULTS_FILENAME
-    if not rp.exists():
+def get_results(run_id: str) -> Dict[str, Any]:
+    run_dir = (RUNS_DIR / run_id).resolve()
+    results_path = run_dir / "results.json"
+    if not results_path.exists():
         raise HTTPException(status_code=404, detail="Run results not found.")
-    try:
-        return JSONResponse(content=json.loads(rp.read_text(encoding="utf-8")))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse stored results.json: {e}")
+    results = _safe_read_json(results_path)
+
+    # Also include api_artifacts here for convenience
+    results_with_links = dict(results)
+    results_with_links["api_artifacts"] = _build_api_artifacts(run_id, results)
+    return results_with_links
 
 
 @app.get("/api/runs/{run_id}/files/{filename}")
 def get_file(run_id: str, filename: str):
-    filename = _safe_filename(filename)
-    p = _run_dir(run_id) / filename
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="File not found for this run.")
-    # Let FastAPI infer content-type; FileResponse handles streaming efficiently.
-    return FileResponse(path=str(p), filename=filename)
+    run_dir = (RUNS_DIR / run_id).resolve()
+    file_path = (run_dir / filename).resolve()
 
+    # Prevent path traversal
+    if not str(file_path).startswith(str(run_dir) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
 
-@app.post("/api/analyze")
-async def analyze(config: UploadFile = File(...)):
-    """
-    Input: multipart/form-data field 'config' (YAML)
-    Runs engine and returns results.json verbatim (no reshaping).
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
 
-    Also persists all artifacts (results.json, report.html, pngs) under:
-        STORAGE_DIR/<run_id>/
-
-    Response header:
-        X-Run-Id: <run_id>
-    """
-    if not config.filename:
-        raise HTTPException(status_code=400, detail="Missing filename for uploaded config.")
-
-    filename = _safe_filename(config.filename)
-    lower = filename.lower()
-    if not (lower.endswith(".yml") or lower.endswith(".yaml")):
-        raise HTTPException(status_code=400, detail="Config must be a .yml or .yaml file.")
-
-    content = await config.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded config file is empty.")
-
-    run_id = str(uuid.uuid4())
-    dst_run_dir = _run_dir(run_id)
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="pq_run_") as td:
-            run_dir = Path(td)
-            out_dir = run_dir / "outputs"
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            config_path = run_dir / filename
-            config_path.write_bytes(content)
-
-            try:
-                proc = _run_engine(config_path=config_path, out_dir=out_dir)
-            except subprocess.TimeoutExpired:
-                raise HTTPException(
-                    status_code=504,
-                    detail="Engine run timed out. Increase ENGINE_TIMEOUT_SECONDS or optimize inputs.",
-                )
-
-            results_path = out_dir / RESULTS_FILENAME
-
-            if proc.returncode != 0:
-                stdout = (proc.stdout or "")[-8000:]
-                stderr = (proc.stderr or "")[-8000:]
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "message": "Engine execution failed.",
-                        "returncode": proc.returncode,
-                        "stdout_tail": stdout,
-                        "stderr_tail": stderr,
-                    },
-                )
-
-            if not results_path.exists():
-                stdout = (proc.stdout or "")[-8000:]
-                stderr = (proc.stderr or "")[-8000:]
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "message": "Engine did not produce results.json.",
-                        "stdout_tail": stdout,
-                        "stderr_tail": stderr,
-                    },
-                )
-
-            # Persist artifacts before responding
-            _copy_outputs(out_dir, dst_run_dir)
-
-            try:
-                results_obj = json.loads(results_path.read_text(encoding="utf-8"))
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to parse results.json: {e}")
-
-            resp = JSONResponse(content=results_obj)
-            resp.headers["X-Run-Id"] = run_id
-            return resp
-
-    except HTTPException:
-        # On errors, clean up the run dir so storage doesn't fill with failed runs
-        if dst_run_dir.exists():
-            shutil.rmtree(dst_run_dir, ignore_errors=True)
-        raise
-    except Exception as e:
-        if dst_run_dir.exists():
-            shutil.rmtree(dst_run_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Unexpected server error: {e}")
+    # Force download (nice for consultants)
+    return FileResponse(
+        path=str(file_path),
+        filename=file_path.name,
+        media_type=None,
+    )
