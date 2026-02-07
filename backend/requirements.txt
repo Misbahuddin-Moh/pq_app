@@ -1,0 +1,7 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# Install the frozen engine from your private repo.
+# For production, pin to a tag like @v0.1.0 for reproducible deploys.
+git+ssh://git@github.com/Misbahuddin-Moh/pq-engine.git@main
