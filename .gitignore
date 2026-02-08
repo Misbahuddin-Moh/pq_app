@@ -30,3 +30,8 @@ backend/storage/**
 
 # Allow frontend lockfile for deterministic builds (Render npm ci)
 !web-ui/power-insight-dashboard-main/package-lock.json
+
+# Allow Vite entry file for frontend build
+!web-ui/power-insight-dashboard-main/index.html
+
+!web-ui/power-insight-dashboard-main/index.html
