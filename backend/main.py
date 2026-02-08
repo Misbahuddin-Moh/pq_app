@@ -5,7 +5,6 @@ import uuid
 import shutil
 import tempfile
 import subprocess
-import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -59,6 +58,13 @@ def _safe_read_json(path: Path) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to read results.json: {e}")
 
 
+def _run_dir_for(run_id: str) -> Path:
+    run_dir = (RUNS_DIR / run_id).resolve()
+    if not run_dir.exists() or not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return run_dir
+
+
 def _build_api_artifacts(run_id: str, results: Dict[str, Any]) -> Dict[str, Any]:
     """
     Add UI-friendly, deployment-agnostic (relative) URLs for artifacts.
@@ -104,9 +110,7 @@ def _build_api_artifacts(run_id: str, results: Dict[str, Any]) -> Dict[str, Any]
             name = r.get("name")
             path = r.get("path")
             if isinstance(path, str) and path:
-                api_artifacts["raw"].append(
-                    {"name": name, "url": f"{base}/files/{Path(path).name}"}
-                )
+                api_artifacts["raw"].append({"name": name, "url": f"{base}/files/{Path(path).name}"})
 
     return api_artifacts
 
@@ -176,13 +180,26 @@ def _run_engine(config_bytes: bytes, config_filename: str) -> Dict[str, Any]:
         return {"run_id": run_id, "results": results}
 
 
-def _safe_run_dir(run_id: str) -> Path:
-    run_dir = (RUNS_DIR / run_id).resolve()
-    if not str(run_dir).startswith(str(RUNS_DIR) + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid run id.")
-    if not run_dir.exists() or not run_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Run not found.")
-    return run_dir
+def _make_zip_for_run(run_id: str) -> Path:
+    """
+    Create a zip of RUNS_DIR/<run_id> containing all files in that directory.
+    Writes to a temp location and returns the zip path.
+    """
+    run_dir = _run_dir_for(run_id)
+
+    # Name like: pq_run_<runid>.zip
+    zip_base = f"pq_run_{run_id}"
+    tmp_root = Path(tempfile.mkdtemp(prefix="pq_zip_")).resolve()
+    zip_path_no_ext = tmp_root / zip_base
+
+    # shutil.make_archive returns the full path to the created archive.
+    created = shutil.make_archive(
+        base_name=str(zip_path_no_ext),
+        format="zip",
+        root_dir=str(run_dir),
+        base_dir=".",  # include files at top-level of run_dir
+    )
+    return Path(created).resolve()
 
 
 # -----------------------------
@@ -201,10 +218,7 @@ async def analyze(config: UploadFile = File(...)) -> Response:
     """
     try:
         config_bytes = await config.read()
-        payload = _run_engine(
-            config_bytes=config_bytes,
-            config_filename=config.filename or "config.yaml",
-        )
+        payload = _run_engine(config_bytes=config_bytes, config_filename=config.filename or "config.yaml")
         run_id = payload["run_id"]
         results = payload["results"]
 
@@ -222,7 +236,7 @@ async def analyze(config: UploadFile = File(...)) -> Response:
 
 @app.get("/api/runs/{run_id}/results")
 def get_results(run_id: str) -> Dict[str, Any]:
-    run_dir = _safe_run_dir(run_id)
+    run_dir = (RUNS_DIR / run_id).resolve()
     results_path = run_dir / "results.json"
     if not results_path.exists():
         raise HTTPException(status_code=404, detail="Run results not found.")
@@ -236,7 +250,7 @@ def get_results(run_id: str) -> Dict[str, Any]:
 
 @app.get("/api/runs/{run_id}/files/{filename}")
 def get_file(run_id: str, filename: str):
-    run_dir = _safe_run_dir(run_id)
+    run_dir = _run_dir_for(run_id)
     file_path = (run_dir / filename).resolve()
 
     # Prevent path traversal
@@ -257,52 +271,18 @@ def get_file(run_id: str, filename: str):
 @app.get("/api/runs/{run_id}/download.zip")
 def download_zip(run_id: str):
     """
-    Download a single ZIP that includes:
-      - report.html (if present)
-      - results.json (if present)
-      - any PNG plots in the run directory
+    Download a single zip pack containing:
+    - results.json
+    - report.html
+    - any PNG plots produced by the engine
+    - any other files in the run directory
+
+    Note: This creates the zip on-demand (temporary) and streams it back.
     """
-    run_dir = _safe_run_dir(run_id)
-
-    # Pick files to include (keep it simple + deterministic)
-    include: List[Path] = []
-    for name in ["report.html", "results.json"]:
-        p = run_dir / name
-        if p.exists() and p.is_file():
-            include.append(p)
-
-    for p in sorted(run_dir.glob("*.png")):
-        if p.exists() and p.is_file():
-            include.append(p)
-
-    # Also include any other known artifacts (optional)
-    for p in sorted(run_dir.glob("*.csv")):
-        if p.exists() and p.is_file():
-            include.append(p)
-
-    if not include:
-        raise HTTPException(status_code=404, detail="No artifacts found for this run.")
-
-    # Build zip in a temp file and serve it
-    tmp = tempfile.NamedTemporaryFile(prefix=f"pq_{run_id}_", suffix=".zip", delete=False)
-    tmp_path = Path(tmp.name).resolve()
-    tmp.close()
-
-    try:
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for p in include:
-                zf.write(p, arcname=p.name)
-
-        return FileResponse(
-            path=str(tmp_path),
-            filename=f"pq_report_pack_{run_id}.zip",
-            media_type="application/zip",
-        )
-    except Exception as e:
-        # Ensure we don't leak temp files on errors
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Failed to build zip: {e}")
+    zip_path = _make_zip_for_run(run_id)
+    # Use FileResponse; temp folder will be cleaned up by OS eventually.
+    return FileResponse(
+        path=str(zip_path),
+        filename=f"pq_run_{run_id}.zip",
+        media_type="application/zip",
+    )
