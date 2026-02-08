@@ -23,8 +23,6 @@ build/
 .DS_Store
 
 # Node (engine repo should not track these)
-package.json
-package-lock.json
 
 # Runtime / generated artifacts
 backend/storage/
