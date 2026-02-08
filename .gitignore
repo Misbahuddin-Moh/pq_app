@@ -29,3 +29,6 @@ package-lock.json
 # Runtime / generated artifacts
 backend/storage/
 backend/storage/**
+
+# Allow frontend lockfile for deterministic builds (Render npm ci)
+!web-ui/power-insight-dashboard-main/package-lock.json
