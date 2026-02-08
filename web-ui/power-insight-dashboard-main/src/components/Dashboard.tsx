@@ -15,7 +15,6 @@ import {
   CheckCircle2,
   Settings2,
   Play,
-  Link as LinkIcon,
   PanelLeft,
   PanelLeftClose,
   X,
@@ -142,6 +141,7 @@ type ResultsWithArtifacts = ResultsData & {
   api_artifacts?: {
     results_url?: string;
     report_html_url?: string;
+    download_zip_url?: string;
     plots?: { name: string; url: string }[];
     raw?: { name: string; url: string }[];
     [k: string]: any;
@@ -149,6 +149,12 @@ type ResultsWithArtifacts = ResultsData & {
   executive_summary?: any;
   series?: any;
 };
+
+type DownloadItem = { label: string; url: string };
+type RunItem = { run_id: string; generated_utc?: string; downloads: DownloadItem[] };
+
+const RUNS_STORAGE_KEY = "pq_app_runs_v1";
+const MAX_RECENT_RUNS = 5;
 
 function Field({
   label,
@@ -330,6 +336,65 @@ tool:
 `;
 }
 
+function buildDownloadsFromResults(
+  results: ResultsWithArtifacts | null,
+  run_id: string | undefined
+): RunItem | null {
+  if (!results || !run_id) return null;
+  const r: any = results;
+
+  const downloads: DownloadItem[] = [];
+
+  const reportUrl = getApiUrl(r?.api_artifacts?.report_html_url);
+  if (reportUrl) downloads.push({ label: "report.html", url: reportUrl });
+
+  const plots: any[] = Array.isArray(r?.api_artifacts?.plots) ? r.api_artifacts.plots : [];
+  for (const p of plots) {
+    if (!p?.url) continue;
+    const u = getApiUrl(String(p.url));
+    if (!u) continue;
+    downloads.push({ label: `${String(p.name ?? "plot")}.png`, url: u });
+  }
+
+  const raw: any[] = Array.isArray(r?.api_artifacts?.raw) ? r.api_artifacts.raw : [];
+  const rawResults = raw.find((x) => String(x?.name ?? "").toLowerCase().includes("results"));
+  const rawUrl = rawResults?.url ? getApiUrl(String(rawResults.url)) : undefined;
+  if (rawUrl) {
+    downloads.push({ label: "results.json (file)", url: rawUrl });
+  } else {
+    const resultsUrl = getApiUrl(r?.api_artifacts?.results_url);
+    if (resultsUrl) downloads.push({ label: "results.json (API)", url: resultsUrl });
+  }
+
+  return {
+    run_id,
+    generated_utc: (results as any)?.generated_utc,
+    downloads,
+  };
+}
+
+function safeLoadRecentRuns(): RunItem[] {
+  try {
+    const raw = localStorage.getItem(RUNS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((x) => x && typeof x.run_id === "string" && Array.isArray(x.downloads))
+      .slice(0, MAX_RECENT_RUNS);
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentRuns(runs: RunItem[]) {
+  try {
+    localStorage.setItem(RUNS_STORAGE_KEY, JSON.stringify(runs.slice(0, MAX_RECENT_RUNS)));
+  } catch {
+    // ignore
+  }
+}
+
 export function Dashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>("run-analysis");
 
@@ -339,7 +404,6 @@ export function Dashboard() {
   const [error, setError] = useState<string>();
   const [runId, setRunId] = useState<string>();
 
-  // Collapsible sidebar (desktop) + drawer (mobile)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -436,19 +500,6 @@ export function Dashboard() {
     setActiveTab("results");
   };
 
-  const handleDownloadResults = () => {
-    if (!results) return;
-    const blob = new Blob([JSON.stringify(results, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "results.json";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   const handleOpenReport = () => {
     const r: any = results;
     const apiReportUrl = getApiUrl(r?.api_artifacts?.report_html_url);
@@ -496,6 +547,15 @@ export function Dashboard() {
       setFileName("api_results.json");
       setActiveTab("results");
       setSidebarOpen(false);
+
+      if (hdrRunId) {
+        const current = buildDownloadsFromResults(data, hdrRunId);
+        if (current && current.downloads.length > 0) {
+          const existing = safeLoadRecentRuns();
+          const deduped = [current, ...existing.filter((x) => x.run_id != current.run_id)];
+          saveRecentRuns(deduped);
+        }
+      }
     } catch (e: any) {
       console.error(e);
       setError(e?.message ?? "Failed to run analysis.");
@@ -525,25 +585,11 @@ export function Dashboard() {
       ? r.executive_summary.key_takeaways
       : [];
 
-    const reportUrl = getApiUrl(r.api_artifacts?.report_html_url);
-    const resultsUrl = getApiUrl(r.api_artifacts?.results_url);
-
-    const plots: { name: string; url: string }[] = Array.isArray(
-      r.api_artifacts?.plots
-    )
+    const plots: { name: string; url: string }[] = Array.isArray(r.api_artifacts?.plots)
       ? r.api_artifacts.plots
           .filter((p: any) => p?.url)
           .map((p: any) => ({
             name: String(p.name ?? "plot"),
-            url: String(p.url),
-          }))
-      : [];
-
-    const raw: { name: string; url: string }[] = Array.isArray(r.api_artifacts?.raw)
-      ? r.api_artifacts.raw
-          .filter((p: any) => p?.url)
-          .map((p: any) => ({
-            name: String(p.name ?? "raw"),
             url: String(p.url),
           }))
       : [];
@@ -563,39 +609,49 @@ export function Dashboard() {
       iscIl: iscIl !== undefined ? Number(iscIl) : undefined,
       worstH,
       keyTakeaways,
-      reportUrl,
-      resultsUrl,
       plots,
-      raw,
       thdvSeriesPoints,
     };
   }, [results]);
 
+  const currentRun = useMemo(() => {
+    return buildDownloadsFromResults(results, runId);
+  }, [results, runId]);
+
+  const recentRuns = useMemo(() => {
+    const existing = safeLoadRecentRuns();
+    if (!currentRun) return existing;
+    return existing.filter((x) => x.run_id !== currentRun.run_id);
+  }, [currentRun]);
+
+  const downloadZipUrl = useMemo(() => {
+    const rel = (results as any)?.api_artifacts?.download_zip_url as string | undefined;
+    return getApiUrl(rel);
+  }, [results]);
+
   const hasResults = !!results;
   const summaryTitleSplit = (normalized?.recommended ?? "").split(" - ");
-
   const desktopAsideWidth = sidebarCollapsed ? "lg:w-20" : "lg:w-72";
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
-      {/* Mobile drawer sidebar */}
       {sidebarOpen ? (
         <div className="lg:hidden fixed inset-0 z-50">
           <div
-            className="absolute inset-0 bg-black/40"
+            className="absolute inset-0 bg-black/60"
             onClick={() => setSidebarOpen(false)}
           />
-          <div className="absolute inset-y-0 left-0 w-[18rem] max-w-[85vw] bg-sidebar p-4">
+          <div className="absolute inset-y-0 left-0 w-[18rem] max-w-[85vw] bg-background border-r border-border shadow-xl p-4">
             <div className="flex items-center justify-between mb-3">
-              <div className="text-sm font-semibold text-sidebar-foreground flex items-center gap-2">
-                <PanelLeft className="h-4 w-4 text-sidebar-primary" />
+              <div className="text-sm font-semibold text-foreground flex items-center gap-2">
+                <PanelLeft className="h-4 w-4 text-primary" />
                 Menu
               </div>
               <Button
                 variant="outline"
                 size="icon"
-                className="bg-sidebar-accent border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent/80"
                 onClick={() => setSidebarOpen(false)}
+                aria-label="Close sidebar"
               >
                 <X className="h-4 w-4" />
               </Button>
@@ -607,12 +663,15 @@ export function Dashboard() {
               generatedTime={results?.generated_utc}
               isLoading={isLoading}
               fileName={fileName}
+              downloadZipUrl={downloadZipUrl}
+              downloadZipLabel="Download report pack (.zip)"
+              currentRun={currentRun ?? undefined}
+              recentRuns={recentRuns}
             />
           </div>
         </div>
       ) : null}
 
-      {/* Desktop sidebar */}
       <aside
         className={[
           "hidden lg:block bg-sidebar p-4 lg:min-h-screen shrink-0 transition-[width] duration-200 ease-in-out",
@@ -626,12 +685,15 @@ export function Dashboard() {
             generatedTime={results?.generated_utc}
             isLoading={isLoading}
             fileName={fileName}
+            downloadZipUrl={downloadZipUrl}
+            downloadZipLabel="Download report pack (.zip)"
+            currentRun={currentRun ?? undefined}
+            recentRuns={recentRuns}
           />
         </div>
       </aside>
 
       <main className="flex-1 p-4 lg:p-6 overflow-x-hidden">
-        {/* Top controls row: consistent toggles for desktop + mobile */}
         <div className="flex items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
             <Button
@@ -851,12 +913,9 @@ export function Dashboard() {
                   </h2>
                   <DataTable
                     columns={
-                      (results as any).tables.tipping_points_min_ssc_required
-                        .columns
+                      (results as any).tables.tipping_points_min_ssc_required.columns
                     }
-                    rows={
-                      (results as any).tables.tipping_points_min_ssc_required.rows
-                    }
+                    rows={(results as any).tables.tipping_points_min_ssc_required.rows}
                   />
                 </section>
 
@@ -885,45 +944,6 @@ export function Dashboard() {
                     </div>
                   </section>
                 ) : null}
-
-                <section>
-                  <h2 className="text-lg font-semibold text-foreground mb-4">
-                    Downloads
-                  </h2>
-                  <div className="flex flex-wrap gap-3">
-                    <Button
-                      onClick={handleDownloadResults}
-                      variant="outline"
-                      className="gap-2"
-                    >
-                      <Download className="h-4 w-4" />
-                      Download results.json
-                    </Button>
-
-                    {normalized?.reportUrl ? (
-                      <Button
-                        onClick={handleOpenReport}
-                        variant="outline"
-                        className="gap-2"
-                      >
-                        <FileText className="h-4 w-4" />
-                        Open report.html
-                      </Button>
-                    ) : null}
-
-                    {normalized?.resultsUrl ? (
-                      <a
-                        href={normalized.resultsUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
-                      >
-                        <LinkIcon className="h-4 w-4" />
-                        Open results.json (API)
-                      </a>
-                    ) : null}
-                  </div>
-                </section>
 
                 <section>
                   <Alert className="bg-muted/50 border-muted">
@@ -979,9 +999,7 @@ export function Dashboard() {
                         <Button
                           type="button"
                           className="gap-2"
-                          onClick={() =>
-                            selectedPreset && applyPreset(selectedPreset)
-                          }
+                          onClick={() => selectedPreset && applyPreset(selectedPreset)}
                         >
                           <CheckCircle2 className="h-4 w-4" />
                           Apply Preset
@@ -1052,10 +1070,7 @@ export function Dashboard() {
                     />
                   </Field>
 
-                  <Field
-                    label="PCC Short-Circuit Strength (SC MVA)"
-                    hint="utility stiffness"
-                  >
+                  <Field label="PCC Short-Circuit Strength (SC MVA)" hint="utility stiffness">
                     <TextInput
                       type="number"
                       step="0.1"
@@ -1082,15 +1097,10 @@ export function Dashboard() {
                     />
                   </Field>
 
-                  <Field
-                    label="Topology set"
-                    hint="controls which topology presets are evaluated"
-                  >
+                  <Field label="Topology set" hint="controls which topology presets are evaluated">
                     <SelectInput
                       value={topologyMode}
-                      onChange={(e) =>
-                        setTopologyMode(e.target.value as TopologyMode)
-                      }
+                      onChange={(e) => setTopologyMode(e.target.value as TopologyMode)}
                     >
                       <option value="all">All (6/12/18/AFE)</option>
                       <option value="afe_low_harm">AFE (low harmonics)</option>
@@ -1105,9 +1115,7 @@ export function Dashboard() {
                       value={kwIsOutput ? "true" : "false"}
                       onChange={(e) => setKwIsOutput(e.target.value === "true")}
                     >
-                      <option value="true">
-                        kW is output (kw_is_output=true)
-                      </option>
+                      <option value="true">kW is output (kw_is_output=true)</option>
                       <option value="false">kW is input (kw_is_output=false)</option>
                     </SelectInput>
                   </Field>
@@ -1124,11 +1132,7 @@ export function Dashboard() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3">
-                  <Button
-                    onClick={handleRunAnalysis}
-                    className="gap-2"
-                    disabled={isLoading}
-                  >
+                  <Button onClick={handleRunAnalysis} className="gap-2" disabled={isLoading}>
                     <Play className="h-4 w-4" />
                     {isLoading ? "Running..." : "Generate Screening Report"}
                   </Button>
@@ -1138,9 +1142,7 @@ export function Dashboard() {
                     variant="outline"
                     className="gap-2"
                     onClick={() => {
-                      const blob = new Blob([configYamlPreview], {
-                        type: "text/yaml",
-                      });
+                      const blob = new Blob([configYamlPreview], { type: "text/yaml" });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement("a");
                       a.href = url;
@@ -1175,8 +1177,8 @@ export function Dashboard() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="text-sm text-muted-foreground">
-                      After a run, artifacts will appear in the Results tab as
-                      API-backed links and thumbnails.
+                      After a run, artifacts appear in the sidebar as a single ZIP download
+                      plus individual links (report, plots, results).
                     </CardContent>
                   </Card>
                 </div>
