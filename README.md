@@ -1,5 +1,8 @@
 ## Enterprise Harmonic Compliance Screening Dashboard
 
+Author- 
+Misbahuddin Mohammad and Hassan Ahmed Mohammad
+
 **Frontend and API layer for pq-engine.**
 
 ------------------------------------------------------------------------
