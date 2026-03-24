@@ -7,6 +7,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -155,9 +156,10 @@ def _run_engine(config_bytes: bytes, config_filename: str) -> Dict[str, Any]:
 
         if proc.returncode != 0:
             raise HTTPException(
-                status_code=500,
+                status_code=422,
                 detail={
-                    "message": "Engine execution failed.",
+                    "error_layer": "execution",
+                    "message": "Engine subprocess execution failed.",
                     "returncode": proc.returncode,
                     "stdout_tail": _tail(proc.stdout, 2000),
                     "stderr_tail": _tail(proc.stderr, 4000),
@@ -168,7 +170,10 @@ def _run_engine(config_bytes: bytes, config_filename: str) -> Dict[str, Any]:
         if not results_path.exists():
             raise HTTPException(
                 status_code=500,
-                detail="Engine completed but results.json was not produced.",
+                detail={
+                    "error_layer": "output",
+                    "message": "Engine completed but results.json artifact is missing or malformed.",
+                }
             )
 
         # Persist all artifacts (results.json, report.html, pngs, etc.)
@@ -222,16 +227,24 @@ async def analyze(config: UploadFile = File(...)) -> Response:
         run_id = payload["run_id"]
         results = payload["results"]
 
-        # Add UI-friendly relative URLs without altering engine output
+        # Add UI-friendly relative URLs in a completely separated REST envelope
         api_artifacts = _build_api_artifacts(run_id, results)
-        merged = dict(results)
-        merged["api_artifacts"] = api_artifacts
+        
+        envelope = {
+            "run_id": run_id,
+            "status": "completed",
+            "engine_version": results.get("tool", {}).get("version", "unknown"),
+            "results_schema_version": results.get("schema_version", "unknown"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "results": results,
+            "artifacts_api_urls": api_artifacts,
+        }
 
-        return JSONResponse(content=merged, headers={"X-Run-Id": run_id})
+        return JSONResponse(content=envelope, headers={"X-Run-Id": run_id})
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected server error: {e}")
+        raise HTTPException(status_code=500, detail={"error_layer": "input", "message": f"Unexpected server error: {e}"})
 
 
 @app.get("/api/runs/{run_id}/results")
@@ -242,10 +255,18 @@ def get_results(run_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Run results not found.")
     results = _safe_read_json(results_path)
 
-    # Also include api_artifacts here for convenience
-    results_with_links = dict(results)
-    results_with_links["api_artifacts"] = _build_api_artifacts(run_id, results)
-    return results_with_links
+    # Return the same decoupled REST envelope format
+    api_artifacts = _build_api_artifacts(run_id, results)
+    
+    envelope = {
+        "run_id": run_id,
+        "status": "completed",
+        "engine_version": results.get("tool", {}).get("version", "unknown"),
+        "results_schema_version": results.get("schema_version", "unknown"),
+        "results": results,
+        "artifacts_api_urls": api_artifacts,
+    }
+    return envelope
 
 
 @app.get("/api/runs/{run_id}/files/{filename}")

@@ -43,12 +43,17 @@ type Preset = {
     vllV: number;
     freqHz: number;
     demandKw: number;
+    linearDemandKw: number;
     loadPu: number;
     pfDisp: number;
     eff: number;
     kwIsOutput: boolean;
     scMva: number;
     zExp: number;
+    txKva: number;
+    txZPct: number;
+    cableROhm: number;
+    cableXOhm: number;
     thdvLimit: number;
     topologyMode: TopologyMode;
     enableSweeps: boolean;
@@ -64,12 +69,17 @@ const PRESETS: Preset[] = [
       vllV: 415.0,
       freqHz: 60.0,
       demandKw: 1000.0,
+      linearDemandKw: 0.0,
       loadPu: 0.6,
       pfDisp: 0.99,
       eff: 0.96,
       kwIsOutput: true,
       scMva: 50.0,
       zExp: 1.0,
+      txKva: 0.0,
+      txZPct: 0.0,
+      cableROhm: 0.0,
+      cableXOhm: 0.0,
       thdvLimit: 5.0,
       topologyMode: "all",
       enableSweeps: true,
@@ -83,12 +93,17 @@ const PRESETS: Preset[] = [
       vllV: 415.0,
       freqHz: 60.0,
       demandKw: 1500.0,
+      linearDemandKw: 0.0,
       loadPu: 0.8,
       pfDisp: 0.98,
       eff: 0.96,
       kwIsOutput: true,
       scMva: 20.0,
       zExp: 1.0,
+      txKva: 0.0,
+      txZPct: 0.0,
+      cableROhm: 0.0,
+      cableXOhm: 0.0,
       thdvLimit: 5.0,
       topologyMode: "all",
       enableSweeps: true,
@@ -102,12 +117,17 @@ const PRESETS: Preset[] = [
       vllV: 415.0,
       freqHz: 60.0,
       demandKw: 2000.0,
+      linearDemandKw: 0.0,
       loadPu: 0.8,
       pfDisp: 0.99,
       eff: 0.97,
       kwIsOutput: true,
       scMva: 250.0,
       zExp: 1.0,
+      txKva: 0.0,
+      txZPct: 0.0,
+      cableROhm: 0.0,
+      cableXOhm: 0.0,
       thdvLimit: 5.0,
       topologyMode: "all",
       enableSweeps: true,
@@ -121,12 +141,17 @@ const PRESETS: Preset[] = [
       vllV: 415.0,
       freqHz: 60.0,
       demandKw: 1500.0,
+      linearDemandKw: 0.0,
       loadPu: 0.7,
       pfDisp: 0.99,
       eff: 0.97,
       kwIsOutput: true,
       scMva: 50.0,
       zExp: 1.0,
+      txKva: 0.0,
+      txZPct: 0.0,
+      cableROhm: 0.0,
+      cableXOhm: 0.0,
       thdvLimit: 5.0,
       topologyMode: "afe_low_harm",
       enableSweeps: true,
@@ -134,7 +159,7 @@ const PRESETS: Preset[] = [
   },
 ];
 
-const BACKEND_BASE_URL = "https://pq-app-backend.onrender.com";
+const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 type ResultsWithArtifacts = ResultsData & {
   schema_version?: string;
@@ -260,12 +285,17 @@ function buildConfigYaml(params: {
   vll_v: number;
   frequency_hz: number;
   demand_kw: number;
+  linear_demand_kw: number;
   load_pu: number;
   pf_displacement: number;
   efficiency: number;
   kw_is_output: boolean;
   sc_mva: number;
   z_exp: number;
+  tx_kva: number;
+  tx_z_pct: number;
+  cable_r_ohm: number;
+  cable_x_ohm: number;
   thdv_limit_pct: number;
   topology_mode: TopologyMode;
   enable_sweeps: boolean;
@@ -304,6 +334,7 @@ ${tippingOpts.map((o) => `      - "${o}"`).join("\n")}`;
 
 load:
   demand_kw: ${yamlNumber(params.demand_kw)}
+  linear_demand_kw: ${yamlNumber(params.linear_demand_kw)}
   load_pu: ${yamlNumber(params.load_pu)}
   pf_displacement: ${yamlNumber(params.pf_displacement)}
   efficiency: ${yamlNumber(params.efficiency)}
@@ -312,6 +343,10 @@ load:
 grid:
   sc_mva: ${yamlNumber(params.sc_mva)}
   z_exp: ${yamlNumber(params.z_exp)}
+  transformer_kva: ${yamlNumber(params.tx_kva)}
+  transformer_z_pct: ${yamlNumber(params.tx_z_pct)}
+  cable_r_ohm: ${yamlNumber(params.cable_r_ohm)}
+  cable_x_ohm: ${yamlNumber(params.cable_x_ohm)}
 
 limits:
   thdv_limit_pct: ${yamlNumber(params.thdv_limit_pct)}
@@ -414,12 +449,17 @@ export function Dashboard() {
   const [vllV, setVllV] = useState(415.0);
   const [freqHz, setFreqHz] = useState(60.0);
   const [demandKw, setDemandKw] = useState(1000.0);
+  const [linearDemandKw, setLinearDemandKw] = useState(0.0);
   const [loadPu, setLoadPu] = useState(0.6);
   const [pfDisp, setPfDisp] = useState(0.99);
   const [eff, setEff] = useState(0.96);
   const [kwIsOutput, setKwIsOutput] = useState(true);
   const [scMva, setScMva] = useState(50.0);
   const [zExp, setZExp] = useState(1.0);
+  const [txKva, setTxKva] = useState(0.0);
+  const [txZPct, setTxZPct] = useState(0.0);
+  const [cableROhm, setCableROhm] = useState(0.0);
+  const [cableXOhm, setCableXOhm] = useState(0.0);
   const [thdvLimit, setThdvLimit] = useState(5.0);
   const [topologyMode, setTopologyMode] = useState<TopologyMode>("all");
   const [enableSweeps, setEnableSweeps] = useState(true);
@@ -432,12 +472,17 @@ export function Dashboard() {
     setVllV(p.values.vllV);
     setFreqHz(p.values.freqHz);
     setDemandKw(p.values.demandKw);
+    setLinearDemandKw(p.values.linearDemandKw);
     setLoadPu(p.values.loadPu);
     setPfDisp(p.values.pfDisp);
     setEff(p.values.eff);
     setKwIsOutput(p.values.kwIsOutput);
     setScMva(p.values.scMva);
     setZExp(p.values.zExp);
+    setTxKva(p.values.txKva);
+    setTxZPct(p.values.txZPct);
+    setCableROhm(p.values.cableROhm);
+    setCableXOhm(p.values.cableXOhm);
     setThdvLimit(p.values.thdvLimit);
     setTopologyMode(p.values.topologyMode);
     setEnableSweeps(p.values.enableSweeps);
@@ -448,12 +493,17 @@ export function Dashboard() {
       vll_v: vllV,
       frequency_hz: freqHz,
       demand_kw: demandKw,
+      linear_demand_kw: linearDemandKw,
       load_pu: loadPu,
       pf_displacement: pfDisp,
       efficiency: eff,
       kw_is_output: kwIsOutput,
       sc_mva: scMva,
       z_exp: zExp,
+      tx_kva: txKva,
+      tx_z_pct: txZPct,
+      cable_r_ohm: cableROhm,
+      cable_x_ohm: cableXOhm,
       thdv_limit_pct: thdvLimit,
       topology_mode: topologyMode,
       enable_sweeps: enableSweeps,
@@ -462,12 +512,17 @@ export function Dashboard() {
     vllV,
     freqHz,
     demandKw,
+    linearDemandKw,
     loadPu,
     pfDisp,
     eff,
     kwIsOutput,
     scMva,
     zExp,
+    txKva,
+    txZPct,
+    cableROhm,
+    cableXOhm,
     thdvLimit,
     topologyMode,
     enableSweeps,
@@ -541,7 +596,13 @@ export function Dashboard() {
         );
       }
 
-      const data = (await resp.json()) as ResultsWithArtifacts;
+      const rawData = (await resp.json()) as any;
+      const data = (rawData.results ? {
+         ...rawData.results,
+         api_artifacts: rawData.artifacts_api_urls,
+         generated_utc: rawData.created_at || rawData.results.generated_utc
+      } : rawData) as ResultsWithArtifacts;
+
       setResults(data);
       setRunId(hdrRunId);
       setFileName("api_results.json");
@@ -818,13 +879,13 @@ export function Dashboard() {
                     <SummaryCard
                       title="Risk Voltage"
                       value={String(normalized?.riskV ?? "—")}
-                      status={String(normalized?.riskV ?? "—")}
+                      status={String(normalized?.riskV ?? "—") as any}
                       icon={AlertTriangle}
                     />
                     <SummaryCard
                       title="Risk Current"
                       value={String(normalized?.riskI ?? "—")}
-                      status={String(normalized?.riskI ?? "—")}
+                      status={String(normalized?.riskI ?? "—") as any}
                       icon={AlertTriangle}
                     />
                   </div>
@@ -1043,6 +1104,15 @@ export function Dashboard() {
                     />
                   </Field>
 
+                  <Field label="Linear Load (kW)" hint="dilutes harmonics perfectly">
+                    <TextInput
+                      type="number"
+                      step="1"
+                      value={linearDemandKw}
+                      onChange={(e) => setLinearDemandKw(Number(e.target.value))}
+                    />
+                  </Field>
+
                   <Field label="Load pu" hint="0–1 (fraction of demand)">
                     <TextInput
                       type="number"
@@ -1085,6 +1155,42 @@ export function Dashboard() {
                       step="0.1"
                       value={zExp}
                       onChange={(e) => setZExp(Number(e.target.value))}
+                    />
+                  </Field>
+
+                  <Field label="Transformer Size (kVA)" hint="Adds tx impedance">
+                    <TextInput
+                      type="number"
+                      step="10"
+                      value={txKva}
+                      onChange={(e) => setTxKva(Number(e.target.value))}
+                    />
+                  </Field>
+
+                  <Field label="Transformer Z(%)" hint="e.g 5.75%">
+                    <TextInput
+                      type="number"
+                      step="0.1"
+                      value={txZPct}
+                      onChange={(e) => setTxZPct(Number(e.target.value))}
+                    />
+                  </Field>
+
+                  <Field label="Cable R (ohm)" hint="Thevenin network R component">
+                    <TextInput
+                      type="number"
+                      step="0.001"
+                      value={cableROhm}
+                      onChange={(e) => setCableROhm(Number(e.target.value))}
+                    />
+                  </Field>
+
+                  <Field label="Cable X (ohm)" hint="Thevenin network X component">
+                    <TextInput
+                      type="number"
+                      step="0.001"
+                      value={cableXOhm}
+                      onChange={(e) => setCableXOhm(Number(e.target.value))}
                     />
                   </Field>
 
