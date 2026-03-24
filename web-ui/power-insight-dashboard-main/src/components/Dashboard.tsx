@@ -159,7 +159,7 @@ const PRESETS: Preset[] = [
   },
 ];
 
-const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : "https://pq-app-backend.onrender.com");
 
 type ResultsWithArtifacts = ResultsData & {
   schema_version?: string;
